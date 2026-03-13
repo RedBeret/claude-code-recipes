@@ -9,6 +9,7 @@ authors = [{name = "RedBeret"}]
 dependencies = [
     "claude-code-sdk>=0.0.25",
     "anthropic>=0.49.0",
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

@@ -309,3 +309,510 @@ class TestParallelTasks:
 
     def test_remove_worktree_callable(self, module):
         assert callable(module.remove_worktree)
+
+# ── Recipe 5: Session Management ─────────────────────────────────────────────
+
+
+class TestSessionManagement:
+
+    @pytest.fixture(scope="class")
+    def module(self):
+        return import_recipe("session-management")
+
+    @pytest.fixture
+    def store(self, module, tmp_path):
+        return module.SessionStore(path=tmp_path / "sessions.json")
+
+    def test_session_store_creates_file_on_save(self, module, tmp_path):
+        store = module.SessionStore(path=tmp_path / "s.json")
+        session = module.SavedSession(session_id="abc123", task="test task")
+        store.save(session)
+        assert (tmp_path / "s.json").exists()
+
+    def test_session_store_save_and_get(self, store, module):
+        session = module.SavedSession(session_id="sid-001", task="Analyze code")
+        store.save(session)
+        retrieved = store.get("sid-001")
+        assert retrieved is not None
+        assert retrieved.session_id == "sid-001"
+        assert retrieved.task == "Analyze code"
+
+    def test_session_store_get_missing_returns_none(self, store):
+        assert store.get("nonexistent-id") is None
+
+    def test_session_store_list_active_excludes_completed(self, store, module):
+        store.save(module.SavedSession(session_id="active-1", task="Active"))
+        store.save(module.SavedSession(session_id="done-1", task="Done"))
+        store.mark_completed("done-1", summary="finished")
+        active = store.list_active()
+        active_ids = [s.session_id for s in active]
+        assert "active-1" in active_ids
+        assert "done-1" not in active_ids
+
+    def test_session_store_list_all_includes_completed(self, store, module):
+        store.save(module.SavedSession(session_id="s-all-1", task="A"))
+        store.save(module.SavedSession(session_id="s-all-2", task="B"))
+        store.mark_completed("s-all-2", "done")
+        all_sessions = store.list_all()
+        all_ids = [s.session_id for s in all_sessions]
+        assert "s-all-1" in all_ids
+        assert "s-all-2" in all_ids
+
+    def test_mark_completed_sets_flag(self, store, module):
+        store.save(module.SavedSession(session_id="to-complete", task="Task"))
+        store.mark_completed("to-complete", summary="All done")
+        s = store.get("to-complete")
+        assert s.completed is True
+        assert s.result_summary == "All done"
+
+    def test_session_store_delete(self, store, module):
+        store.save(module.SavedSession(session_id="to-delete", task="Delete me"))
+        assert store.delete("to-delete") is True
+        assert store.get("to-delete") is None
+
+    def test_session_store_delete_missing_returns_false(self, store):
+        assert store.delete("never-existed") is False
+
+    def test_saved_session_to_dict(self, module):
+        s = module.SavedSession(session_id="abc", task="Test")
+        d = s.to_dict()
+        assert d["session_id"] == "abc"
+        assert d["task"] == "Test"
+        assert "created_at" in d
+
+    def test_saved_session_from_dict(self, module):
+        data = {
+            "session_id": "xyz",
+            "task": "From dict",
+            "created_at": 1234567890.0,
+            "last_active": 1234567890.0,
+            "completed": False,
+            "result_summary": "",
+        }
+        s = module.SavedSession.from_dict(data)
+        assert s.session_id == "xyz"
+        assert s.task == "From dict"
+
+    def test_format_session_list_empty(self, module):
+        result = module.format_session_list([])
+        assert "(no sessions)" in result
+
+    def test_format_session_list_shows_session(self, module):
+        s = module.SavedSession(session_id="abc123def456", task="Write a report")
+        result = module.format_session_list([s])
+        assert "abc123" in result
+
+    def test_resumable_agent_run_is_async(self, module):
+        assert inspect.iscoroutinefunction(module.ResumableAgent.run)
+
+    def test_resumable_agent_resume_is_async(self, module):
+        assert inspect.iscoroutinefunction(module.ResumableAgent.resume)
+
+    def test_resumable_agent_init(self, module, tmp_path):
+        store = module.SessionStore(path=tmp_path / "sessions.json")
+        agent = module.ResumableAgent(store=store)
+        assert agent.store is store
+
+
+# ── Recipe 6: Scheduled Agents ────────────────────────────────────────────────
+
+
+class TestScheduledAgents:
+
+    @pytest.fixture(scope="class")
+    def module(self):
+        return import_recipe("scheduled-agents")
+
+    def test_cron_matches_wildcard(self, module):
+        from datetime import datetime, timezone
+        dt = datetime(2026, 3, 13, 14, 30, tzinfo=timezone.utc)  # 14:30 Thursday
+        assert module.cron_matches("* * * * *", dt) is True
+
+    def test_cron_matches_exact_minute(self, module):
+        from datetime import datetime, timezone
+        dt = datetime(2026, 3, 13, 14, 30, tzinfo=timezone.utc)
+        assert module.cron_matches("30 14 * * *", dt) is True
+        assert module.cron_matches("29 14 * * *", dt) is False
+
+    def test_cron_matches_step(self, module):
+        from datetime import datetime, timezone
+        dt_30 = datetime(2026, 3, 13, 14, 30, tzinfo=timezone.utc)
+        dt_31 = datetime(2026, 3, 13, 14, 31, tzinfo=timezone.utc)
+        dt_15 = datetime(2026, 3, 13, 14, 15, tzinfo=timezone.utc)
+        assert module.cron_matches("*/15 * * * *", dt_30) is True
+        assert module.cron_matches("*/15 * * * *", dt_15) is True
+        assert module.cron_matches("*/15 * * * *", dt_31) is False
+
+    def test_cron_matches_range(self, module):
+        from datetime import datetime, timezone
+        # 9am Monday-Friday
+        mon = datetime(2026, 3, 9, 9, 0, tzinfo=timezone.utc)   # Monday
+        sat = datetime(2026, 3, 14, 9, 0, tzinfo=timezone.utc)  # Saturday
+        assert module.cron_matches("0 9 * * 1-5", mon) is True
+        assert module.cron_matches("0 9 * * 1-5", sat) is False
+
+    def test_cron_alias_hourly(self, module):
+        from datetime import datetime, timezone
+        dt = datetime(2026, 3, 13, 14, 0, tzinfo=timezone.utc)  # top of hour
+        assert module.cron_matches("@hourly", dt) is True
+
+    def test_cron_alias_daily(self, module):
+        from datetime import datetime, timezone
+        midnight = datetime(2026, 3, 13, 0, 0, tzinfo=timezone.utc)
+        other = datetime(2026, 3, 13, 12, 0, tzinfo=timezone.utc)
+        assert module.cron_matches("@daily", midnight) is True
+        assert module.cron_matches("@daily", other) is False
+
+    def test_cron_invalid_field_count(self, module):
+        import pytest
+        from datetime import datetime, timezone
+        dt = datetime(2026, 3, 13, 14, 30, tzinfo=timezone.utc)
+        with pytest.raises(ValueError):
+            module.cron_matches("* * * *", dt)  # only 4 fields
+
+    def test_parse_field_wildcard(self, module):
+        values = module._parse_field("*", 0, 59)
+        assert len(values) == 60
+        assert 0 in values and 59 in values
+
+    def test_parse_field_exact(self, module):
+        values = module._parse_field("30", 0, 59)
+        assert values == {30}
+
+    def test_parse_field_range(self, module):
+        values = module._parse_field("1-5", 0, 59)
+        assert values == {1, 2, 3, 4, 5}
+
+    def test_parse_field_comma(self, module):
+        values = module._parse_field("1,15,30", 0, 59)
+        assert values == {1, 15, 30}
+
+    def test_scheduled_task_matches(self, module):
+        from datetime import datetime, timezone
+        task = module.ScheduledTask(
+            name="test",
+            schedule="0 * * * *",
+            prompt="hello",
+        )
+        top_of_hour = datetime(2026, 3, 13, 15, 0, tzinfo=timezone.utc)
+        not_top = datetime(2026, 3, 13, 15, 1, tzinfo=timezone.utc)
+        assert task.matches(top_of_hour) is True
+        assert task.matches(not_top) is False
+
+    def test_scheduled_task_disabled(self, module):
+        from datetime import datetime, timezone
+        task = module.ScheduledTask(
+            name="test",
+            schedule="* * * * *",
+            prompt="hello",
+            enabled=False,
+        )
+        dt = datetime(2026, 3, 13, 15, 0, tzinfo=timezone.utc)
+        assert task.matches(dt) is False
+
+    def test_agent_scheduler_init(self, module):
+        tasks = [module.ScheduledTask(name="t1", schedule="@hourly", prompt="p")]
+        scheduler = module.AgentScheduler(tasks=tasks)
+        assert len(scheduler.tasks) == 1
+
+    def test_load_tasks_from_config(self, module):
+        config = [
+            {"name": "task1", "schedule": "@hourly", "prompt": "Check status."},
+            {"name": "task2", "schedule": "0 9 * * *", "prompt": "Morning report."},
+        ]
+        tasks = module.load_tasks_from_config(config)
+        assert len(tasks) == 2
+        assert tasks[0].name == "task1"
+        assert tasks[1].schedule == "0 9 * * *"
+
+    def test_load_tasks_default_enabled(self, module):
+        config = [{"name": "t", "schedule": "@daily", "prompt": "p"}]
+        tasks = module.load_tasks_from_config(config)
+        assert tasks[0].enabled is True
+
+    def test_seconds_until_next_minute(self, module):
+        from datetime import datetime, timezone
+        dt = datetime(2026, 3, 13, 14, 30, 45, 500000, tzinfo=timezone.utc)
+        secs = module.seconds_until_next_minute(dt)
+        assert 14.0 <= secs <= 15.0
+
+    def test_scheduler_run_is_async(self, module):
+        assert inspect.iscoroutinefunction(module.AgentScheduler.run)
+
+    def test_scheduler_run_now_is_async(self, module):
+        assert inspect.iscoroutinefunction(module.AgentScheduler.run_now)
+
+
+# ── Recipe 7: Signal Integration ─────────────────────────────────────────────
+
+
+class TestSignalIntegration:
+
+    @pytest.fixture(scope="class")
+    def module(self):
+        return import_recipe("signal-integration")
+
+    def test_signal_config_from_env(self, module, monkeypatch):
+        monkeypatch.setenv("SIGNAL_ACCOUNT", "+12065551234")
+        monkeypatch.setenv("SIGNAL_ALLOWLIST", "+19995550001,+19995550002")
+        config = module.SignalConfig.from_env()
+        assert config.account == "+12065551234"
+        assert len(config.allowlist) == 2
+        assert "+19995550001" in config.allowlist
+
+    def test_signal_config_empty_allowlist(self, module, monkeypatch):
+        monkeypatch.setenv("SIGNAL_ACCOUNT", "+12065551234")
+        monkeypatch.delenv("SIGNAL_ALLOWLIST", raising=False)
+        config = module.SignalConfig.from_env()
+        assert config.allowlist == []
+
+    def test_signal_bot_allowlist_check(self, module):
+        config = module.SignalConfig(
+            account="+12065551234",
+            allowlist=["+19995550001"],
+        )
+        bot = module.SignalBot(config=config)
+        assert bot.is_allowed("+19995550001") is True
+        assert bot.is_allowed("+19995550000") is False
+
+    def test_signal_bot_empty_allowlist_blocks_all(self, module):
+        config = module.SignalConfig(account="+12065551234", allowlist=[])
+        bot = module.SignalBot(config=config)
+        assert bot.is_allowed("+12065551234") is False
+        assert bot.is_allowed("+19995550001") is False
+
+    def test_incoming_message_dataclass(self, module):
+        msg = module.IncomingMessage(
+            sender="+12065551234",
+            text="Hello there",
+            timestamp=1709900000,
+        )
+        assert msg.sender == "+12065551234"
+        assert msg.text == "Hello there"
+        assert msg.group_id is None
+
+    def test_signal_transport_init(self, module):
+        config = module.SignalConfig(account="+12065551234", allowlist=[])
+        transport = module.SignalTransport(config=config)
+        assert transport.config is config
+
+    def test_handle_message_is_async(self, module):
+        assert inspect.iscoroutinefunction(module.SignalBot.handle_message)
+
+    def test_bot_run_is_async(self, module):
+        assert inspect.iscoroutinefunction(module.SignalBot.run)
+
+    def test_bot_run_once_is_async(self, module):
+        assert inspect.iscoroutinefunction(module.SignalBot.run_once)
+
+    def test_send_notification_callable(self, module):
+        assert callable(module.send_notification)
+
+    def test_signal_config_defaults(self, module):
+        config = module.SignalConfig(account="+1234", allowlist=[])
+        assert "127.0.0.1" in config.daemon_url
+        assert config.poll_timeout == 5
+
+
+# ── Recipe 8: Encrypted Stores ────────────────────────────────────────────────
+
+
+class TestEncryptedStores:
+
+    @pytest.fixture(scope="class")
+    def module(self):
+        return import_recipe("encrypted-stores")
+
+    @pytest.fixture
+    def key(self, module):
+        return module.generate_key()
+
+    @pytest.fixture
+    def engine(self, module, key):
+        return module.EncryptionEngine(key=key)
+
+    @pytest.fixture
+    def store(self, module, tmp_path, key):
+        fields = module.MEMORY_FIELDS
+        engine = module.EncryptionEngine(key=key)
+        return module.EncryptedStore(
+            db_path=tmp_path / "test.db",
+            table="memories",
+            fields=fields,
+            engine=engine,
+        )
+
+    def test_generate_key_is_valid_fernet_key(self, module):
+        key = module.generate_key()
+        # Fernet keys are URL-safe base64 of 32 bytes = 44 chars
+        assert len(key) == 44
+        # Should be able to create a Fernet instance
+        from cryptography.fernet import Fernet
+        f = Fernet(key)
+        assert f is not None
+
+    def test_engine_encrypt_decrypt_roundtrip(self, engine):
+        plaintext = "My secret API key is sk-abc123"
+        token = engine.encrypt(plaintext)
+        assert token != plaintext
+        recovered = engine.decrypt(token)
+        assert recovered == plaintext
+
+    def test_engine_encrypt_json_roundtrip(self, engine):
+        obj = {"ip": "192.168.1.100", "user": "alice", "tags": [1, 2, 3]}
+        token = engine.encrypt_json(obj)
+        recovered = engine.decrypt_json(token)
+        assert recovered == obj
+
+    def test_engine_encrypt_bytes_roundtrip(self, engine):
+        data = b"\x00\x01\x02\x03secret bytes"
+        encrypted = engine.encrypt_bytes(data)
+        assert encrypted != data
+        assert engine.decrypt_bytes(encrypted) == data
+
+    def test_engine_wrong_key_raises(self, module):
+        from cryptography.fernet import InvalidToken
+        key1 = module.generate_key()
+        key2 = module.generate_key()
+        e1 = module.EncryptionEngine(key=key1)
+        e2 = module.EncryptionEngine(key=key2)
+        token = e1.encrypt("secret")
+        with pytest.raises(InvalidToken):
+            e2.decrypt(token)
+
+    def test_encrypted_store_insert_and_get(self, store, module):
+        import time
+        rid = "row-001"
+        store.insert({
+            "id": rid,
+            "created_at": time.time(),
+            "session_id": "s1",
+            "role": "user",
+            "content": "My secret message",
+            "metadata": '{"key": "value"}',
+        })
+        row = store.get(rid)
+        assert row is not None
+        assert row["id"] == rid
+        assert row["content"] == "My secret message"
+
+    def test_encrypted_store_content_is_encrypted_in_db(self, tmp_path, module):
+        import sqlite3
+        import time
+        key = module.generate_key()
+        engine = module.EncryptionEngine(key=key)
+        store = module.EncryptedStore(
+            db_path=tmp_path / "enc.db",
+            table="memories",
+            fields=module.MEMORY_FIELDS,
+            engine=engine,
+        )
+        store.insert({
+            "id": "enc-001",
+            "created_at": time.time(),
+            "session_id": "s1",
+            "role": "user",
+            "content": "plaintext secret",
+            "metadata": "{}",
+        })
+        # Check raw DB — content should NOT be plaintext
+        conn = sqlite3.connect(tmp_path / "enc.db")
+        raw = conn.execute("SELECT content FROM memories WHERE id = 'enc-001'").fetchone()
+        conn.close()
+        assert raw[0] != "plaintext secret"
+        assert len(raw[0]) > 50  # Fernet tokens are much longer
+
+    def test_encrypted_store_query_by_plain_field(self, store, module):
+        import time
+        for i in range(3):
+            store.insert({
+                "id": f"q-{i}",
+                "created_at": time.time(),
+                "session_id": "session-query",
+                "role": "user",
+                "content": f"Message {i}",
+                "metadata": "{}",
+            })
+        results = store.query("session_id = ?", ("session-query",))
+        assert len(results) == 3
+        contents = [r["content"] for r in results]
+        assert "Message 0" in contents
+
+    def test_encrypted_store_update(self, store, module):
+        import time
+        store.insert({
+            "id": "upd-001",
+            "created_at": time.time(),
+            "session_id": "s1",
+            "role": "user",
+            "content": "original",
+            "metadata": "{}",
+        })
+        assert store.update("upd-001", {"content": "updated secret"}) is True
+        row = store.get("upd-001")
+        assert row["content"] == "updated secret"
+
+    def test_encrypted_store_delete(self, store, module):
+        import time
+        store.insert({
+            "id": "del-001",
+            "created_at": time.time(),
+            "session_id": "s1",
+            "role": "user",
+            "content": "to delete",
+            "metadata": "{}",
+        })
+        assert store.delete("del-001") is True
+        assert store.get("del-001") is None
+
+    def test_encrypted_store_count(self, store, module):
+        import time
+        initial = store.count()
+        store.insert({
+            "id": "cnt-001",
+            "created_at": time.time(),
+            "session_id": "s1",
+            "role": "user",
+            "content": "counting",
+            "metadata": "{}",
+        })
+        assert store.count() == initial + 1
+
+    def test_create_memory_store_factory(self, module, tmp_path):
+        key = module.generate_key()
+        store = module.create_memory_store(tmp_path / "mem.db", key)
+        assert store is not None
+        assert store.table == "memories"
+
+    def test_derive_key_deterministic(self, module):
+        password = "correct-horse-battery-staple"
+        salt = b"\x00" * 16
+        key1 = module.derive_key(password, salt)
+        key2 = module.derive_key(password, salt)
+        assert key1 == key2
+
+    def test_derive_key_different_salts(self, module):
+        password = "same-password"
+        salt1 = b"\x00" * 16
+        salt2 = b"\x01" * 16
+        key1 = module.derive_key(password, salt1)
+        key2 = module.derive_key(password, salt2)
+        assert key1 != key2
+
+    def test_load_key_from_env(self, module, monkeypatch):
+        key = module.generate_key()
+        monkeypatch.setenv("STORE_ENCRYPTION_KEY", key.decode())
+        loaded = module.load_key_from_env("STORE_ENCRYPTION_KEY")
+        assert loaded == key
+
+    def test_load_key_from_env_missing(self, module, monkeypatch):
+        monkeypatch.delenv("STORE_ENCRYPTION_KEY", raising=False)
+        assert module.load_key_from_env("STORE_ENCRYPTION_KEY") is None
+
+    def test_field_spec_ddl_plain(self, module):
+        f = module.FieldSpec("name", "TEXT")
+        assert f.ddl() == "name TEXT"
+
+    def test_field_spec_ddl_primary_key(self, module):
+        f = module.FieldSpec("id", "TEXT", primary_key=True)
+        assert "PRIMARY KEY" in f.ddl()
